@@ -283,6 +283,7 @@ copy_section(PartialDNSMessage *pm, PackedRR **msgsection, uint16_t sec_len, uin
 	}	
 }
 
+
 void
 copy_message_contents(PartialDNSMessage *data, DNSMessage *msg) {
 	sem_wait(&(data->lock));
@@ -361,93 +362,6 @@ message_complete(PartialDNSMessage *msg) {
 			&& (msg->nscount == msg->authoritative_done && msg->nscount_set)
 			&& (msg->arcount == msg->additionals_done && msg->arcount_set));
 	sem_post(&(msg->lock));
-	return res;
-}
-
-bool
-message_complete_soon(PartialDNSMessage *msg) {
-	sem_wait(&(msg->lock));
-	bool res = true;
-	if (!(msg->ancount_set && msg->nscount_set &&msg->arcount_set)) {
-		return false;
-	}
-	for (int i = 0; i < msg->ancount; i++) {
-		PartialRR *prr = msg->answers_section[i];
-		if (prr->is_complete) continue;
-		if (prr->rrid == 0) {
-			sem_post(&(msg->lock));
-			return false;
-		}
-		for (int j = 0; j < prr->expected_blocks; j++) {
-			res = (res && ((prr->block_markers[j] == BLOCKWAITING)
-				   || (prr->block_markers[j] == BLOCKRECVD)));
-			if (!res) {
-				sem_post(&(msg->lock));
-				return res;
-			}
-		}
-	}
-	for (int i = 0; i < msg->nscount; i++) {
-		PartialRR *prr = msg->authoritative_section[i];
-		if (prr->is_complete) continue;
-		if (prr->rrid == 0) {
-			sem_post(&(msg->lock));
-			return false;
-		}
-		for (int j = 0; j < prr->expected_blocks; j++) {
-			res = (res && ((prr->block_markers[j] == BLOCKWAITING)
-				   || (prr->block_markers[j] == BLOCKRECVD)));
-			if (!res) {
-				sem_post(&(msg->lock));
-				return res;
-			}
-		}
-	}
-	for (int i = 0; i < msg->arcount; i++) {
-		PartialRR *prr = msg->additional_section[i];
-		if (prr->is_complete) continue;
-		if (prr->rrid == 0) {
-			sem_post(&(msg->lock));
-			return false;
-		}
-		for (int j = 0; j < prr->expected_blocks; j++) {
-			res = (res && ((prr->block_markers[j] == BLOCKWAITING)
-				   || (prr->block_markers[j] == BLOCKRECVD)));
-			if (!res) {
-				sem_post(&(msg->lock));
-				return false;
-			}
-		}
-	}
-	sem_post(&(msg->lock));
-	return res;
-}
-
-uint16_t
-frags_requested(PartialRR **section, uint16_t section_len) {
-	uint16_t res = 0;
-	for (int i = 0; i < section_len; i++) {
-		PartialRR *prr = section[i];
-		if (prr->is_complete && prr->rrid == 0) {
-			continue;
-		}
-		if (prr->is_complete) {
-			res += 1;
-			continue;
-		}
-		if (prr->rrid == 0) {
-			continue;
-		}
-		bool is_requested = true;
-		for (int j = 0; j < prr->expected_blocks; j++) {
-			is_requested =  (is_requested && ((prr->block_markers[j] == BLOCKRECVD) ||
-			    				(prr->block_markers[j] == BLOCKWAITING)));
-			if (!is_requested) {
-				break;
-			}
-		}
-		if (is_requested) res += 1;
-	}
 	return res;
 }
 
@@ -676,7 +590,6 @@ internal_send(int fd, unsigned char *bytes, size_t byte_len,
 	}
 	ci->iphdr = malloc(sizeof(struct iphdr));
 	memcpy(ci->iphdr, iphdr, sizeof(struct iphdr));
-	fflush(stdout);
 	uintptr_t test;
 	uint64_t *question_hash_port = malloc(sizeof(uint64_t));
 	memset(question_hash_port, 0, sizeof(uint64_t));
@@ -764,7 +677,7 @@ raw_socket_send(int fd, unsigned char *payload, size_t payload_len, uint32_t sad
 	}
 	iph->tot_len = htons(iph->tot_len);
 	memcpy(data, payload, payload_len);
-	iph->id = htons(1234); // This is fine for POC but obviously not for deployment
+	iph->id = htons(1234); // This is fine for a PoC but not ready for deployment
 	iph->frag_off = 0;
 	iph->ttl = 255;
 	if (is_tcp) {
@@ -961,11 +874,11 @@ partial_to_dnsmessage(PartialDNSMessage *in, DNSMessage **out) {
 
 
 void
-pack_section(PackedRR ***packed_rrfrags, PartialRR **section, uint16_t section_len, uint16_t section_start, uint16_t *rrfrag_count, uint16_t *rrids_to_complete, uint16_t rrs_not_complete, uint16_t *cur_message_size) {
+pack_section(PackedRR ***packed_rrfrags, PartialRR **section, uint16_t section_len, uint16_t *rrfrag_count, uint16_t *rrids_to_complete, uint16_t rrs_not_complete, uint16_t *cur_message_size) {
 	uint16_t cursize = *cur_message_size;
 	PackedRR **rrfrags = malloc(sizeof(PackedRR *) * rrs_not_complete);
 	uint16_t _rrfrag_count = 0;
-	for (uint16_t i = section_start; (i < rrs_not_complete) && cursize < MAXUDP; i++) {
+	for (uint16_t i = 0; (i < rrs_not_complete) && cursize < MAXUDP; i++) {
 		RRFrag *rrf;
 		uint16_t rrid = rrids_to_complete[i];
 		PartialRR *prr = NULL;
@@ -1071,8 +984,6 @@ requester_thread(DNSMessage *msg, struct iphdr *iphdr, void *transport_header, b
 	uint16_t id = msg->identification;
 	PartialDNSMessage *pm;
 	if (!hashmap_get(requester_state, &id, sizeof(uint16_t), (uintptr_t *)&pm)) {
-		printf("Failed to find a pm when we really should have...\n");
-		fflush(stdout);
 		uint16_t *_id = malloc(sizeof(uint16_t));
 		*_id = msg->identification;
 		init_partialdnsmessage(&pm);
@@ -1101,9 +1012,6 @@ requester_thread(DNSMessage *msg, struct iphdr *iphdr, void *transport_header, b
 			raw_socket_send(fd, bytes, bytelen, iphdr->saddr, iphdr->daddr, ((struct udphdr *)transport_header)->source, ((struct udphdr *)transport_header)->dest, is_tcp);
 		}
 		generic_close(&fd);
-		return;
-	} else if (message_complete_soon(pm)) {
-		// We've requested everything we need to request and just need to wait.
 		return;
 	}
 
@@ -1161,68 +1069,60 @@ requester_thread(DNSMessage *msg, struct iphdr *iphdr, void *transport_header, b
 			j++;
 		}
 	}
-	uint16_t an_frags_requested = frags_requested(pm->answers_section, pm->ancount);
-	uint16_t ns_frags_requested = frags_requested(pm->authoritative_section, pm->nscount);
-	uint16_t ar_frags_requested = frags_requested(pm->additional_section, pm->arcount);
-	while ((an_frags_requested < an_not_complete) ||
-		(ns_frags_requested < ns_not_complete) ||
-		(ar_frags_requested < ar_not_complete)) {
-		uint16_t cur_message_size = DNSMESSAGEHEADER;
-		PackedRR **an_rrfrags = NULL;
-		uint16_t an_rrfrag_count = 0;
-		PackedRR **ns_rrfrags = NULL;
-		uint16_t ns_rrfrag_count = 0;
-		PackedRR **ar_rrfrags = NULL;
-		uint16_t ar_rrfrag_count = 0;
-		pack_section(&an_rrfrags, pm->answers_section, pm->ancount, an_frags_requested, &an_rrfrag_count, an_rrids_to_complete, an_not_complete, &cur_message_size);
-		pack_section(&ns_rrfrags, pm->authoritative_section, pm->nscount, ns_frags_requested, &ns_rrfrag_count, ns_rrids_to_complete, ns_not_complete, &cur_message_size);
-		pack_section(&ar_rrfrags, pm->additional_section, pm->arcount, ar_frags_requested, &ar_rrfrag_count, ar_rrids_to_complete, ar_not_complete, &cur_message_size);
-		an_frags_requested = frags_requested(pm->answers_section, pm->ancount);
-		ns_frags_requested = frags_requested(pm->authoritative_section, pm->nscount);
-		ar_frags_requested = frags_requested(pm->additional_section, pm->arcount);
-		uint16_t final_size = an_rrfrag_count + ns_rrfrag_count + ar_rrfrag_count;
-		assert(final_size > 0);
-		PackedRR **final_section = malloc(sizeof(PackedRR *) * final_size);
-		for (uint16_t i = 0; i < an_rrfrag_count; i++) {
-			clone_packedrr(an_rrfrags[i], final_section + i);
-		}
-		for (uint16_t i = 0; i < ns_rrfrag_count; i++) {
-			clone_packedrr(ns_rrfrags[i], final_section + i + an_rrfrag_count);
-		}
-		for (uint16_t i = 0; i < ar_rrfrag_count; i++) {
-			clone_packedrr(ar_rrfrags[i], final_section + i + an_rrfrag_count + ns_rrfrag_count);
-		}
-		if (an_rrfrags != NULL)
-			free(an_rrfrags);
-		if (ns_rrfrags != NULL)
-			free(ns_rrfrags);
-		if (ar_rrfrags != NULL)
-			free(ar_rrfrags);
 
-		DNSMessage *req_msg;
-		Question *q;
-		create_question(&q, "",  108, 1);
-		if (create_dnsmessage(&req_msg, msg->identification, 0, 1, 0, 0, final_size, &q, NULL, NULL, final_section) != 0) {
-			printf("Error making DNSMessage asking for more rrfrags\n");
-			ERROR();
-		}
-		int fd;
-		unsigned char *bytes;
-		size_t bytelen;
-		if (!create_raw_socket(&fd)) {
-			printf("Failed to make raw socket to ask for more rrfrags\n");
-			ERROR();
-		}
-		if (dnsmessage_to_bytes(req_msg, &bytes, &bytelen) != 0) {
-			printf("Failed to convert dnsmessage asking for more rrfrags to bytes\n");
-			ERROR();
-		}
-		if (is_tcp) {
-			raw_socket_send(fd, bytes, bytelen, iphdr->daddr, iphdr->saddr, ((struct tcphdr *)transport_header)->dest, ((struct tcphdr *)transport_header)->source, is_tcp);
-		} else {
-			raw_socket_send(fd, bytes, bytelen, iphdr->daddr, iphdr->saddr, ((struct udphdr *)transport_header)->dest, ((struct udphdr *)transport_header)->source, is_tcp);
-		}
+	uint16_t cur_message_size = DNSMESSAGEHEADER;
+	PackedRR **an_rrfrags = NULL;
+	uint16_t an_rrfrag_count = 0;
+	PackedRR **ns_rrfrags = NULL;
+	uint16_t ns_rrfrag_count = 0;
+	PackedRR **ar_rrfrags = NULL;
+	uint16_t ar_rrfrag_count = 0;
+	pack_section(&an_rrfrags, pm->answers_section, pm->ancount, &an_rrfrag_count, an_rrids_to_complete, an_not_complete, &cur_message_size);
+	pack_section(&ns_rrfrags, pm->authoritative_section, pm->nscount, &ns_rrfrag_count, ns_rrids_to_complete, ns_not_complete, &cur_message_size);
+	pack_section(&ar_rrfrags, pm->additional_section, pm->arcount, &ar_rrfrag_count, ar_rrids_to_complete, ar_not_complete, &cur_message_size);
+	uint16_t final_size = an_rrfrag_count + ns_rrfrag_count + ar_rrfrag_count;
+	PackedRR **final_section = malloc(sizeof(PackedRR *) * final_size);
+	for (uint16_t i = 0; i < an_rrfrag_count; i++) {
+		clone_packedrr(an_rrfrags[i], final_section + i);
 	}
+	for (uint16_t i = 0; i < ns_rrfrag_count; i++) {
+		clone_packedrr(ns_rrfrags[i], final_section + i + an_rrfrag_count);
+	}
+	for (uint16_t i = 0; i < ar_rrfrag_count; i++) {
+		clone_packedrr(ar_rrfrags[i], final_section + i + an_rrfrag_count + ns_rrfrag_count);
+	}
+	if (an_rrfrags != NULL)
+		free(an_rrfrags);
+	if (ns_rrfrags != NULL)
+		free(ns_rrfrags);
+	if (ar_rrfrags != NULL)
+		free(ar_rrfrags);
+
+	DNSMessage *req_msg;
+	Question *q;
+	create_question(&q, "",  108, 1);
+	if (create_dnsmessage(&req_msg, msg->identification, 0, 1, 0, 0, final_size, &q, NULL, NULL, final_section) != 0) {
+		printf("Error making DNSMessage asking for more rrfrags\n");
+		ERROR();
+	}
+	int fd;
+	unsigned char *bytes;
+	size_t bytelen;
+	if (!create_raw_socket(&fd)) {
+		printf("Failed to make raw socket to ask for more rrfrags\n");
+		ERROR();
+	}
+	if (dnsmessage_to_bytes(req_msg, &bytes, &bytelen) != 0) {
+		printf("Failed to convert dnsmessage asking for more rrfrags to bytes\n");
+		ERROR();
+	}
+	if (is_tcp) {
+		raw_socket_send(fd, bytes, bytelen, iphdr->daddr, iphdr->saddr, ((struct tcphdr *)transport_header)->dest, ((struct tcphdr *)transport_header)->source, is_tcp);
+	} else {
+		raw_socket_send(fd, bytes, bytelen, iphdr->daddr, iphdr->saddr, ((struct udphdr *)transport_header)->dest, ((struct udphdr *)transport_header)->source, is_tcp);
+	}
+	free(bytes);
+	close(fd);
 }
 
 void
@@ -1292,7 +1192,6 @@ insert_into_state(ResourceRecord *rr, uint16_t *rrids, size_t *rrcount, size_t *
 		*_hash = hash;
 		hashmap_set(responder_cache.map, _hash, sizeof(uint16_t), (uintptr_t)rr);
 		rrids[_rrcount++] = hash;
-		//rrsizes[rrcount++] = rr_outlen;
 	}
 	sem_post(&(responder_cache.lock));
 	*rrcount = _rrcount;
@@ -1363,6 +1262,7 @@ insert_into_state_and_construct_map(DNSMessage* msg, size_t max_size) {
 			fflush(stdout);
 			assert("[ERROR]Couldn't find rr with that rrid" == false);
 		}
+		// mark rrfrag as compressed.
 		rrids[idx] = 0;
 		if ((cur_size - rr->rdsize) >= max_size - DNSMESSAGEHEADER) {
 			// make an rrfrag with fragsize 0
@@ -1439,7 +1339,6 @@ responding_thread_end(struct iphdr *iphdr, void *transport_hdr, bool is_tcp,
 			assert(byte_len <= MAXUDP);
 		}
 		raw_socket_send(fd, msg_bytes, byte_len, iphdr->daddr, iphdr->saddr, ((struct udphdr *)transport_hdr)->dest, ((struct udphdr *)transport_hdr)->source, is_tcp);
-
 	}
 	close(fd);
 }
@@ -1447,6 +1346,7 @@ responding_thread_end(struct iphdr *iphdr, void *transport_hdr, bool is_tcp,
 
 uint32_t
 process_dns_message(struct nfq_q_handle *qh, uint32_t id, unsigned char *payload, size_t payloadLen, struct iphdr *iphdr, void *transport_header, bool is_tcp) {
+	printf("processing dns messages...\n");
 	unsigned char *pkt_content;
 	DNSMessage *msg;
 
@@ -1467,7 +1367,7 @@ process_dns_message(struct nfq_q_handle *qh, uint32_t id, unsigned char *payload
 	}
 
 	size_t msgSize = payloadLen;
-    	if (is_tcp) {
+	if (is_tcp) {
 		pkt_content = payload + sizeof(struct tcphdr) + sizeof(struct iphdr);
 		msgSize -= sizeof(struct tcphdr) + sizeof(struct iphdr);
 	} else {
@@ -1487,6 +1387,7 @@ process_dns_message(struct nfq_q_handle *qh, uint32_t id, unsigned char *payload
 	if (is_tcp) return NF_ACCEPT;
 	assert(!is_tcp);
 	if (is_internal_packet(iphdr)) {
+		printf("is internal packet...\n");
 		size_t outbuff_len = 65355; // Need to account for large messages because of SPHINCS+
 		unsigned char outbuff[outbuff_len];
 		uint64_t *question_hash_port = malloc(sizeof(uint64_t));
@@ -1501,16 +1402,9 @@ process_dns_message(struct nfq_q_handle *qh, uint32_t id, unsigned char *payload
 		} else {
 			assert(false);
 		}
-		/*
-		uint16_t og_port;
-		if (sport == 53) {
-			og_port = dport;
-		} else {
-			og_port = sport;
-		}
-		*/
 		if (handle_internal_packet(qh, id, iphdr, question_hash_port, outbuff, &outbuff_len) && dport != 53) {
 			conn_info *ci;
+			printf("handling internal packet...\n");
 			if (!hashmap_get(connection_info.map, question_hash_port, sizeof(uint64_t), (uintptr_t *)&ci)) {
 				printf("Failed to get ci\n");
 				fflush(stdout);
@@ -1537,6 +1431,7 @@ process_dns_message(struct nfq_q_handle *qh, uint32_t id, unsigned char *payload
 	// so we can't rely our_addr. Instead using a list of addrs
 	// that we are acting in front of.
 	if (is_query(msg)) {
+		printf("packet is query...\n");
 		// If we are sending the packet, and the packet
 		// is a query, then there is nothing for us to
 		// do yet...
@@ -1598,6 +1493,8 @@ process_dns_message(struct nfq_q_handle *qh, uint32_t id, unsigned char *payload
 					uint16_t rrid = rrf->rrid;
 					uint32_t curidx = rrf->curidx;
 					uint32_t fragsize = rrf->fragsize;
+
+					printf("rrid = %u, fragsize = %u", rrid, fragsize);
 					ResourceRecord *rr;
 					if (!hashmap_get(responder_cache.map, &rrid, sizeof(uint16_t), (uintptr_t *)&rr)) {
 						printf("Failed to find a rr with that rrid... shouldn't happen\n");
@@ -1654,12 +1551,15 @@ process_dns_message(struct nfq_q_handle *qh, uint32_t id, unsigned char *payload
 				PartialDNSMessage *data;
 				if (hashmap_get(requester_state, &id, sizeof(uint16_t), (uintptr_t *)&data)) {
 					if (!message_complete(data)) {
+						// if we aren't done, set up a thread to request the missing pieces
+						// maybe lie about source address and say it's from resolver instead of
+						// this daemon. That might make this section a bit cleaner.
 						requester_thread(msg, iphdr, transport_header, is_tcp);
 					}
 					return NF_DROP;
 				} else {
-					// if we get here, then this is a malicious message and we should drop.
 					return NF_DROP;
+					// if we get here, then this is a malicious message and we should drop.
 				}
 			} else {
 				// If this doesn't contain an rrfrag, we have nothing to do, so remove
@@ -1689,6 +1589,8 @@ process_tcp(struct nfq_q_handle *qh, uint32_t id, struct iphdr *ipv4hdr, unsigne
 	struct tcphdr *tcphdr = (struct tcphdr *)((char *)payload + sizeof(*ipv4hdr));
 	uint16_t src_port = ntohs(tcphdr->source);
 	uint16_t dst_port = ntohs(tcphdr->dest);
+	//printf("tcp: <src: %u:%hu, dest: %u:%hu, total size: %lu>\n", ipv4hdr->saddr, src_port, ipv4hdr->daddr, dst_port, payloadLen);
+	//fflush(stdout);
 	return NF_ACCEPT;
 	return process_dns_message(qh, id, payload, payloadLen, ipv4hdr, tcphdr, true);
 }
@@ -1698,6 +1600,8 @@ process_udp(struct nfq_q_handle *qh, uint32_t id, struct iphdr *ipv4hdr, unsigne
 	struct udphdr *udphdr = (struct udphdr *)((char *)payload + sizeof(*ipv4hdr));
 	uint16_t src_port = ntohs(udphdr->source);
 	uint16_t dst_port = ntohs(udphdr->dest);
+	//printf("<src: %u:%hu, dest: %u:%hu, total size: %lu>\n", ipv4hdr->saddr, src_port, ipv4hdr->daddr, dst_port, payloadLen);
+	//fflush(stdout);
 	if (BYPASS) {
 		return NF_ACCEPT;
 	}
@@ -1733,6 +1637,7 @@ process_packet(struct nfq_q_handle *qh, struct nfq_data *data, uint32_t **verdic
 			res = process_udp(qh, id, ipv4hdr, payload, payloadLen);
 		} else if (ipv4hdr->protocol == IPPROTO_ICMP) {
 			icmphdr = (struct icmphdr *)((char *)payload + sizeof(*ipv4hdr));
+			//printf("<type: %hhu, code: %hhu src: %u dest: %u>\n", icmphdr->type, icmphdr->code, ipv4hdr->saddr, ipv4hdr->daddr);
 		} else {
 			res = NF_ACCEPT;
 		}
@@ -1740,10 +1645,13 @@ process_packet(struct nfq_q_handle *qh, struct nfq_data *data, uint32_t **verdic
 		struct udphdr *udphdr = (struct udphdr *)((char *)payload + sizeof(*ipv4hdr));
 		uint16_t src_port = ntohs(udphdr->source);
 		uint16_t dst_port = ntohs(udphdr->dest);
+		//printf("<src: %u:%hu, dest: %u:%hu, total size: %lu>\n", ipv4hdr->saddr, src_port, ipv4hdr->daddr, dst_port, payloadLen);
 		res = NF_DROP;
 	} else {
+		printf("Packet type: %hhu\n", ipv4hdr->protocol);
 		if (ipv4hdr->protocol == IPPROTO_ICMP) {
 			icmphdr = (struct icmphdr *)((char *)payload + sizeof(*ipv4hdr));
+			printf("<type: %hhu, code: %hhu src: %u dest: %u>\n", icmphdr->type, icmphdr->code, ipv4hdr->saddr, ipv4hdr->daddr);
 			res = NF_DROP;
 		} else {
 			res = NF_ACCEPT;
@@ -1763,6 +1671,8 @@ cb(struct nfq_q_handle *qh, struct nfgenmsg *nfmsg, struct nfq_data *nfa, void *
 	uint32_t *verdict_p = &verdict;
 	uint32_t id = process_packet(qh, nfa, &verdict_p);
 	if (*verdict_p == 0xFFFF) {
+		//printf("Got singal to not submit a verdict\n");
+		//fflush(stdout);
 		return 0;
 	}
 	verdict = *verdict_p;
@@ -1858,12 +1768,15 @@ main(int argc, char **argv) {
 			ipaddr = argv[i];
 		}
 	}
+
+	printf("Hello Hibah\n");
 	printf("Starting daemon...\n");
 	size_t buff_size = 0xffff;
 	char buf[buff_size];
 	int fd;
 	/* get this machine's ip address from ioctl */
 	if (get_addr(ipaddr) != 0) return -1;
+	printf("our addr: %u\n", our_addr);
 	/* Create and initialize handle for netfilter_queue */
 	struct nfq_handle *h = nfq_open();
 	init_shared_map(&responder_cache);
@@ -1888,15 +1801,13 @@ main(int argc, char **argv) {
 		return -1;
 	}
 	fd = nfq_fd(h);
-	printf("Listening...\n");
-	fflush(stdout);
 	for(;;) {
 		int rv;
 		struct pollfd ufd;
 		memset(&ufd, 0, sizeof(struct pollfd));
 		ufd.fd = fd;
 		ufd.events = POLLIN;
-		rv = poll(&ufd, 1, 0); // If we time out, then reset hashtable?
+		rv = poll(&ufd, 1, 0);
 		if (rv < 0) {
 			printf("Failed to poll nfq\n");
 			return -1;

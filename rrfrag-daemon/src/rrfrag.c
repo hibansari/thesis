@@ -33,6 +33,11 @@ create_rrfrag(RRFrag **out, uint16_t fragsize, uint32_t curidx, uint32_t rrsize,
 		printf("RRFrag malloc failed.\n");
 		return -1;
 	}
+
+	correct_reed_solomon rs = correct_reed_solomon_create();
+	int parity_bits_size = 200
+	rs = correct_reed_solomon_encode(size, fragdata, rrsize, out);
+
 	res->name = malloc(2);
 	strncpy(res->name, ".", 2);
 
@@ -42,14 +47,16 @@ create_rrfrag(RRFrag **out, uint16_t fragsize, uint32_t curidx, uint32_t rrsize,
 	res->rrsize = rrsize;
 	res->rrid = rrid;
 	if (fragdata != NULL) {
-		res->fragdata = malloc(res->fragsize);
-		memcpy(res->fragdata, fragdata, res->fragsize);
+		res->fragdata = malloc(rs->encoded_polynomial);
+		memcpy(rs->encoded_polynomial, fragdata, res->fragsize);
 	} else {
 		res->fragdata = NULL;
 	}
 	*out = res;
 	return 0;
 }
+
+
 
 int
 bytes_to_rrfrag(unsigned char *in, size_t in_len, size_t *bytes_processed, bool is_query, RRFrag **out) {

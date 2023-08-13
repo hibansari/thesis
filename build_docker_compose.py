@@ -270,7 +270,7 @@ for name_server in ns_data:
 
 docker_compose_file.write("volumes:\n")
 docker_compose_file.write("    dsset-volume:\n")
-docker_compose_file.close();
+docker_compose_file.close()
 
 os.system("cp tmux-run-docker-part1.bash build/tmux-run-docker-part1.bash")
 os.system("cp tmux-run-docker-part2.bash build/tmux-run-docker-part2.bash")
